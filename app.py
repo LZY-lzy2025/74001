@@ -239,6 +239,6 @@ def get_txt_plus():
 
 if __name__ == "__main__":
     scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
-    scheduler.add_job(scrape_job, 'interval', hours=1, next_run_time=datetime.now())
+    scheduler.add_job(scrape_job, 'interval', minutes=30, next_run_time=datetime.now())
     scheduler.start()
     app.run(host='0.0.0.0', port=5000, use_reloader=False)
