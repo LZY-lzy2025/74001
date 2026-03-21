@@ -16,7 +16,7 @@ OUTPUT_FILE = 'output/extracted_ids.txt'
 LAST_RUN_TIME = "尚未执行"
 
 # ==========================================
-# 核心：内置轻量级 XXTEA 解密算法 (Python 翻译版)
+# 核心：内置轻量级 XXTEA 解密算法
 # ==========================================
 def str2long(s, w):
     v = []
@@ -154,6 +154,54 @@ def scrape_job():
     print(f"任务完成，共保存 {len(set(final_ids))} 个独立 ID。")
 
 # ==========================================
+# 提取 M3U 生成逻辑的通用函数
+# ==========================================
+def generate_m3u(mode="clean"):
+    if not os.path.exists(OUTPUT_FILE):
+        return "请稍后再试，爬虫尚未生成数据"
+        
+    with open(OUTPUT_FILE, 'r', encoding='utf-8') as f:
+        ids = [line.strip() for line in f.readlines() if line.strip()]
+    
+    target_key = b"ABCDEFGHIJKLMNOPQRSTUVWX"
+    m3u_content = "#EXTM3U\n"
+    index = 1
+    fake_referer = "https://www.74001.tv/"
+    
+    for raw_id in ids:
+        try:
+            if not raw_id: continue
+            
+            decoded_id = urllib.parse.unquote(raw_id)
+            pad = 4 - (len(decoded_id) % 4)
+            if pad != 4: decoded_id += "=" * pad
+                
+            bin_data = base64.b64decode(decoded_id)
+            decrypted_bytes = xxtea_decrypt(bin_data, target_key)
+            
+            if decrypted_bytes:
+                json_str = decrypted_bytes.decode('utf-8', errors='ignore')
+                data = json.loads(json_str)
+                
+                if 'url' in data:
+                    channel_name = data.get('name') or data.get('title') or f"74体育 直播 {index}"
+                    raw_stream_url = data["url"]
+                    
+                    if mode == "plus":
+                        # 精简防盗链：只加 Referer，去掉所有空格和多余字符，防止播放器解析崩溃
+                        stream_url = f"{raw_stream_url}|Referer={fake_referer}"
+                    else:
+                        # 绝对纯净版：没有任何后缀
+                        stream_url = raw_stream_url
+                    
+                    m3u_content += f'#EXTINF:-1 group-title="体育直播",{channel_name}\n{stream_url}\n'
+                    index += 1
+        except Exception as e:
+            continue
+            
+    return m3u_content
+
+# ==========================================
 # Web 接口
 # ==========================================
 @app.route('/')
@@ -161,7 +209,7 @@ def index():
     return jsonify({
         "status": "running",
         "last_run_time": LAST_RUN_TIME,
-        "endpoints": ["/ids (获取原始ID)", "/m3u (获取M3U订阅)"]
+        "endpoints": ["/ids", "/m3u (纯净原版)", "/m3u_plus (带精简Referer版)"]
     })
 
 @app.route('/ids')
@@ -173,49 +221,19 @@ def get_ids():
     return jsonify({"count": len(ids), "update_time": LAST_RUN_TIME, "ids": ids})
 
 @app.route('/m3u')
-def get_m3u():
-    """读取本地 ID 并自动解密生成 M3U"""
-    if not os.path.exists(OUTPUT_FILE):
-        return Response("请稍后再试，爬虫尚未生成数据", status=404, mimetype='text/plain')
-        
-    with open(OUTPUT_FILE, 'r', encoding='utf-8') as f:
-        ids = [line.strip() for line in f.readlines() if line.strip()]
-    
-    target_key = b"ABCDEFGHIJKLMNOPQRSTUVWX"
-    m3u_content = "#EXTM3U\n"
-    index = 1
-    
-    for raw_id in ids:
-        try:
-            if not raw_id: continue
-            
-            # 1. URL Decode & 补全 Base64
-            decoded_id = urllib.parse.unquote(raw_id)
-            pad = 4 - (len(decoded_id) % 4)
-            if pad != 4:
-                decoded_id += "=" * pad
-                
-            # 2. Base64 Decode
-            bin_data = base64.b64decode(decoded_id)
-            
-            # 3. XXTEA 解密
-            decrypted_bytes = xxtea_decrypt(bin_data, target_key)
-            if decrypted_bytes:
-                # 4. JSON 解析
-                json_str = decrypted_bytes.decode('utf-8', errors='ignore')
-                data = json.loads(json_str)
-                
-                if 'url' in data:
-                    channel_name = data.get('name') or data.get('title') or f"频道 {index}"
-                    m3u_content += f'#EXTINF:-1 group-title="某藤某古",{channel_name}\n{data["url"]}\n'
-                    index += 1
-        except Exception as e:
-            print(f"解密出错跳过: {e}")
-            continue
-            
-    # 设置响应头，让播放器或浏览器识别为文本内容
+def get_m3u_clean():
+    """纯净版 M3U，没有任何防盗链后缀，适合容易崩溃的播放器"""
     return Response(
-        m3u_content, 
+        generate_m3u(mode="clean"), 
+        mimetype='text/plain; charset=utf-8',
+        headers={"Access-Control-Allow-Origin": "*"}
+    )
+
+@app.route('/m3u_plus')
+def get_m3u_plus():
+    """精简防盗链版 M3U，只添加安全的 Referer，去掉了导致断链的空格"""
+    return Response(
+        generate_m3u(mode="plus"), 
         mimetype='text/plain; charset=utf-8',
         headers={"Access-Control-Allow-Origin": "*"}
     )
