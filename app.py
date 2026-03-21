@@ -3,6 +3,8 @@ import requests
 from bs4 import BeautifulSoup
 import base64
 import re
+import urllib.parse
+import json
 from datetime import datetime
 import pytz
 from playwright.sync_api import sync_playwright
@@ -13,6 +15,68 @@ app = Flask(__name__)
 OUTPUT_FILE = 'output/extracted_ids.txt'
 LAST_RUN_TIME = "尚未执行"
 
+# ==========================================
+# 核心：内置轻量级 XXTEA 解密算法 (Python 翻译版)
+# ==========================================
+def str2long(s, w):
+    v = []
+    for i in range(0, len(s), 4):
+        v0 = s[i]
+        v1 = s[i+1] if i+1 < len(s) else 0
+        v2 = s[i+2] if i+2 < len(s) else 0
+        v3 = s[i+3] if i+3 < len(s) else 0
+        v.append(v0 | (v1 << 8) | (v2 << 16) | (v3 << 24))
+    if w:
+        v.append(len(s))
+    return v
+
+def long2str(v, w):
+    vl = len(v)
+    if vl == 0: return b""
+    n = (vl - 1) << 2
+    if w:
+        m = v[-1]
+        if (m < n - 3) or (m > n): return None
+        n = m
+    s = bytearray()
+    for i in range(vl):
+        s.append(v[i] & 0xff)
+        s.append((v[i] >> 8) & 0xff)
+        s.append((v[i] >> 16) & 0xff)
+        s.append((v[i] >> 24) & 0xff)
+    return bytes(s[:n]) if w else bytes(s)
+
+def xxtea_decrypt(data, key):
+    if not data: return b""
+    v = str2long(data, False)
+    k = str2long(key, False)
+    if len(k) < 4:
+        k.extend([0] * (4 - len(k)))
+    n = len(v) - 1
+    if n < 1: return b""
+    
+    z = v[n]
+    y = v[0]
+    delta = 0x9E3779B9
+    q = 6 + 52 // (n + 1)
+    sum_val = (q * delta) & 0xffffffff
+    
+    while sum_val != 0:
+        e = (sum_val >> 2) & 3
+        for p in range(n, 0, -1):
+            z = v[p - 1]
+            mx = (((z >> 5) ^ (y << 2)) + ((y >> 3) ^ (z << 4))) ^ ((sum_val ^ y) + (k[(p & 3) ^ e] ^ z))
+            y = v[p] = (v[p] - mx) & 0xffffffff
+        z = v[n]
+        mx = (((z >> 5) ^ (y << 2)) + ((y >> 3) ^ (z << 4))) ^ ((sum_val ^ y) + (k[(0 & 3) ^ e] ^ z))
+        y = v[0] = (v[0] - mx) & 0xffffffff
+        sum_val = (sum_val - delta) & 0xffffffff
+        
+    return long2str(v, True)
+
+# ==========================================
+# 爬虫任务逻辑
+# ==========================================
 def scrape_job():
     global LAST_RUN_TIME
     tz = pytz.timezone('Asia/Shanghai')
@@ -21,10 +85,9 @@ def scrape_job():
     print(f"[{LAST_RUN_TIME}] 开始执行抓取任务...")
     
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
     }
     
-    # 1. 访问主页，筛选前后3小时内的比赛
     try:
         res = requests.get('https://www.74001.tv', headers=headers, timeout=10)
         soup = BeautifulSoup(res.text, 'html.parser')
@@ -42,16 +105,12 @@ def scrape_job():
                     time_str += " 00:00:00"
                 match_time = tz.localize(datetime.strptime(time_str, '%Y-%m-%d %H:%M:%S'))
                 diff_hours = abs((now - match_time).total_seconds()) / 3600
-                
                 if diff_hours <= 3:
                     match_id = href.split('/')[-1]
                     links_to_visit.append(f"https://www.74001.tv/live/{match_id}")
             except Exception:
                 continue
 
-    print(f"找到 {len(links_to_visit)} 个符合时间窗口的比赛链接。")
-    
-    # 2. 提取并解码 Base64 真实播放页链接
     play_urls = []
     for link in set(links_to_visit):
         try:
@@ -67,71 +126,102 @@ def scrape_job():
                         url = 'http://' + raw_url.replace('!', '.').replace('&nbsp', 'com').replace('*', '/')
                         play_urls.append(url)
         except Exception as e:
-            print(f"解析比赛页面失败 {link}: {e}")
+            print(f"解析页面失败 {link}: {e}")
 
-    # 3. 使用 Playwright 模拟浏览器截获
     final_ids = []
     with sync_playwright() as p:
-        # 必须加 --no-sandbox，否则在 Docker 中会报错
         browser = p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-setuid-sandbox'])
         page = browser.new_page()
-        
         for url in set(play_urls):
             try:
                 requests_list = []
                 page.on("request", lambda request: requests_list.append(request.url))
                 page.goto(url, wait_until='networkidle', timeout=15000)
-                
                 for req_url in requests_list:
                     if 'paps.html?id=' in req_url:
                         extracted_id = req_url.split('paps.html?id=')[-1]
                         final_ids.append(extracted_id)
                         print(f"成功截获 ID: {extracted_id[:20]}...")
                         break
-            except Exception as e:
-                print(f"抓取动态ID超时或跳过 {url}")
-        
+            except Exception:
+                continue
         browser.close()
 
-    # 4. 汇总写入文件
     os.makedirs('output', exist_ok=True)
     with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
         for fid in set(final_ids):
             f.write(fid + '\n')
     print(f"任务完成，共保存 {len(set(final_ids))} 个独立 ID。")
 
-# 配置 Flask 路由
+# ==========================================
+# Web 接口
+# ==========================================
 @app.route('/')
 def index():
-    """主页，显示系统状态"""
     return jsonify({
         "status": "running",
         "last_run_time": LAST_RUN_TIME,
-        "message": "访问 /ids 获取最新提取的 ID 列表"
+        "endpoints": ["/ids (获取原始ID)", "/m3u (获取M3U订阅)"]
     })
 
 @app.route('/ids')
 def get_ids():
-    """读取并返回文件中的 ID"""
     if not os.path.exists(OUTPUT_FILE):
-        return jsonify({"error": "尚未生成数据，请稍后再试"}), 404
+        return jsonify({"error": "尚未生成数据"}), 404
+    with open(OUTPUT_FILE, 'r', encoding='utf-8') as f:
+        ids = [line.strip() for line in f.readlines() if line.strip()]
+    return jsonify({"count": len(ids), "update_time": LAST_RUN_TIME, "ids": ids})
+
+@app.route('/m3u')
+def get_m3u():
+    """读取本地 ID 并自动解密生成 M3U"""
+    if not os.path.exists(OUTPUT_FILE):
+        return Response("请稍后再试，爬虫尚未生成数据", status=404, mimetype='text/plain')
         
     with open(OUTPUT_FILE, 'r', encoding='utf-8') as f:
         ids = [line.strip() for line in f.readlines() if line.strip()]
     
-    return jsonify({
-        "count": len(ids),
-        "update_time": LAST_RUN_TIME,
-        "ids": ids
-    })
+    target_key = b"ABCDEFGHIJKLMNOPQRSTUVWX"
+    m3u_content = "#EXTM3U\n"
+    index = 1
+    
+    for raw_id in ids:
+        try:
+            if not raw_id: continue
+            
+            # 1. URL Decode & 补全 Base64
+            decoded_id = urllib.parse.unquote(raw_id)
+            pad = 4 - (len(decoded_id) % 4)
+            if pad != 4:
+                decoded_id += "=" * pad
+                
+            # 2. Base64 Decode
+            bin_data = base64.b64decode(decoded_id)
+            
+            # 3. XXTEA 解密
+            decrypted_bytes = xxtea_decrypt(bin_data, target_key)
+            if decrypted_bytes:
+                # 4. JSON 解析
+                json_str = decrypted_bytes.decode('utf-8', errors='ignore')
+                data = json.loads(json_str)
+                
+                if 'url' in data:
+                    channel_name = data.get('name') or data.get('title') or f"频道 {index}"
+                    m3u_content += f'#EXTINF:-1 group-title="某藤某古",{channel_name}\n{data["url"]}\n'
+                    index += 1
+        except Exception as e:
+            print(f"解密出错跳过: {e}")
+            continue
+            
+    # 设置响应头，让播放器或浏览器识别为文本内容
+    return Response(
+        m3u_content, 
+        mimetype='text/plain; charset=utf-8',
+        headers={"Access-Control-Allow-Origin": "*"}
+    )
 
 if __name__ == "__main__":
-    # 配置并启动后台定时任务
     scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
-    # next_run_time 设置为当前时间，确保启动服务时立刻执行一次爬虫
     scheduler.add_job(scrape_job, 'interval', hours=1, next_run_time=datetime.now())
     scheduler.start()
-    
-    # 启动 Flask Web 服务
-    # 监听 0.0.0.0 确保外网可以访问，端口使用 5000
     app.run(host='0.0.0.0', port=5000, use_reloader=False)
