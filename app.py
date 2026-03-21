@@ -126,7 +126,7 @@ def scrape_job():
                         url = 'http://' + raw_url.replace('!', '.').replace('&nbsp', 'com').replace('*', '/')
                         play_urls.append(url)
         except Exception as e:
-            print(f"解析页面失败 {link}: {e}")
+            continue
 
     final_ids = []
     with sync_playwright() as p:
@@ -141,7 +141,6 @@ def scrape_job():
                     if 'paps.html?id=' in req_url:
                         extracted_id = req_url.split('paps.html?id=')[-1]
                         final_ids.append(extracted_id)
-                        print(f"成功截获 ID: {extracted_id[:20]}...")
                         break
             except Exception:
                 continue
@@ -154,9 +153,9 @@ def scrape_job():
     print(f"任务完成，共保存 {len(set(final_ids))} 个独立 ID。")
 
 # ==========================================
-# 提取 M3U 生成逻辑的通用函数
+# 统一的播放列表生成逻辑 (支持 M3U 和 TXT)
 # ==========================================
-def generate_m3u(mode="clean"):
+def generate_playlist(fmt="m3u", mode="clean"):
     if not os.path.exists(OUTPUT_FILE):
         return "请稍后再试，爬虫尚未生成数据"
         
@@ -164,12 +163,15 @@ def generate_m3u(mode="clean"):
         ids = [line.strip() for line in f.readlines() if line.strip()]
     
     target_key = b"ABCDEFGHIJKLMNOPQRSTUVWX"
-    m3u_content = "#EXTM3U\n"
-    index = 1
     
-    # 【核心修复】：防盗链检测的是底层 iframe 的域名
+    # 根据格式初始化头部
+    if fmt == "m3u":
+        content = "#EXTM3U\n"
+    else:
+        content = "体育直播,#genre#\n"
+        
+    index = 1
     fake_referer = "https://cloud.yumixiu768.com/" 
-    fake_ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
     
     for raw_id in ids:
         try:
@@ -191,24 +193,22 @@ def generate_m3u(mode="clean"):
                     raw_stream_url = data["url"]
                     
                     if mode == "plus":
-                        # 兼容 DIYP、TVBox、TiviMate 等各种壳的综合防盗链写法
-                        stream_url = f"{raw_stream_url}|Referer={fake_referer}&User-Agent={fake_ua}"
-                        
-                        m3u_content += f'#EXTINF:-1 group-title="体育直播",{channel_name}\n'
-                        # 添加 VLC 兼容头
-                        m3u_content += f'#EXTVLCOPT:http-referrer={fake_referer}\n'
-                        m3u_content += f'#EXTVLCOPT:http-user-agent={fake_ua}\n'
-                        # 添加 DIYP/百川 兼容头
-                        m3u_content += f'#EXTHTTP:{{"User-Agent":"{fake_ua}","Referer":"{fake_referer}"}}\n'
-                        m3u_content += f'{stream_url}\n'
+                        # 精简且安全的防盗链写法，只挂载 Referer，不包含任何换行和空格
+                        stream_url = f"{raw_stream_url}|Referer={fake_referer}"
                     else:
-                        m3u_content += f'#EXTINF:-1 group-title="体育直播",{channel_name}\n{raw_stream_url}\n'
+                        stream_url = raw_stream_url
+                    
+                    # 严格按照格式拼接
+                    if fmt == "m3u":
+                        content += f'#EXTINF:-1 group-title="体育直播",{channel_name}\n{stream_url}\n'
+                    else:
+                        content += f'{channel_name},{stream_url}\n'
                         
                     index += 1
-        except Exception as e:
+        except Exception:
             continue
             
-    return m3u_content
+    return content
 
 # ==========================================
 # Web 接口
@@ -218,34 +218,24 @@ def index():
     return jsonify({
         "status": "running",
         "last_run_time": LAST_RUN_TIME,
-        "endpoints": ["/ids", "/m3u (纯净原版)", "/m3u_plus (带综合Referer/UA防盗链版)"]
+        "endpoints": ["/ids", "/m3u", "/m3u_plus", "/txt", "/txt_plus"]
     })
-
-@app.route('/ids')
-def get_ids():
-    if not os.path.exists(OUTPUT_FILE):
-        return jsonify({"error": "尚未生成数据"}), 404
-    with open(OUTPUT_FILE, 'r', encoding='utf-8') as f:
-        ids = [line.strip() for line in f.readlines() if line.strip()]
-    return jsonify({"count": len(ids), "update_time": LAST_RUN_TIME, "ids": ids})
 
 @app.route('/m3u')
 def get_m3u_clean():
-    """纯净版 M3U，没有任何防盗链后缀"""
-    return Response(
-        generate_m3u(mode="clean"), 
-        mimetype='text/plain; charset=utf-8',
-        headers={"Access-Control-Allow-Origin": "*"}
-    )
+    return Response(generate_playlist("m3u", "clean"), mimetype='text/plain; charset=utf-8', headers={"Access-Control-Allow-Origin": "*"})
 
 @app.route('/m3u_plus')
 def get_m3u_plus():
-    """综合防盗链版 M3U，完美伪装底层 iframe 域名，突破拦截"""
-    return Response(
-        generate_m3u(mode="plus"), 
-        mimetype='text/plain; charset=utf-8',
-        headers={"Access-Control-Allow-Origin": "*"}
-    )
+    return Response(generate_playlist("m3u", "plus"), mimetype='text/plain; charset=utf-8', headers={"Access-Control-Allow-Origin": "*"})
+
+@app.route('/txt')
+def get_txt_clean():
+    return Response(generate_playlist("txt", "clean"), mimetype='text/plain; charset=utf-8', headers={"Access-Control-Allow-Origin": "*"})
+
+@app.route('/txt_plus')
+def get_txt_plus():
+    return Response(generate_playlist("txt", "plus"), mimetype='text/plain; charset=utf-8', headers={"Access-Control-Allow-Origin": "*"})
 
 if __name__ == "__main__":
     scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
