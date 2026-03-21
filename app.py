@@ -16,7 +16,7 @@ OUTPUT_FILE = 'output/extracted_ids.txt'
 LAST_RUN_TIME = "尚未执行"
 
 # ==========================================
-# 核心：内置轻量级 XXTEA 解密算法 (Python 翻译版)
+# 核心：内置轻量级 XXTEA 解密算法
 # ==========================================
 def str2long(s, w):
     v = []
@@ -85,7 +85,7 @@ def scrape_job():
     print(f"[{LAST_RUN_TIME}] 开始执行抓取任务...")
     
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
     }
     
     try:
@@ -174,7 +174,7 @@ def get_ids():
 
 @app.route('/m3u')
 def get_m3u():
-    """读取本地 ID 并自动解密生成 M3U"""
+    """读取本地 ID 并自动解密生成 M3U，内置防盗链 Header 注入"""
     if not os.path.exists(OUTPUT_FILE):
         return Response("请稍后再试，爬虫尚未生成数据", status=404, mimetype='text/plain')
         
@@ -185,35 +185,49 @@ def get_m3u():
     m3u_content = "#EXTM3U\n"
     index = 1
     
+    # 核心伪装参数：欺骗服务器我们是从 74001.tv 网页点进去的
+    fake_referer = "https://www.74001.tv/"
+    fake_ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    
     for raw_id in ids:
         try:
             if not raw_id: continue
             
-            # 1. URL Decode & 补全 Base64
+            # URL Decode & 补全 Base64
             decoded_id = urllib.parse.unquote(raw_id)
             pad = 4 - (len(decoded_id) % 4)
             if pad != 4:
                 decoded_id += "=" * pad
                 
-            # 2. Base64 Decode
+            # Base64 Decode
             bin_data = base64.b64decode(decoded_id)
             
-            # 3. XXTEA 解密
+            # XXTEA 解密
             decrypted_bytes = xxtea_decrypt(bin_data, target_key)
             if decrypted_bytes:
-                # 4. JSON 解析
+                # JSON 解析
                 json_str = decrypted_bytes.decode('utf-8', errors='ignore')
                 data = json.loads(json_str)
                 
                 if 'url' in data:
-                    channel_name = data.get('name') or data.get('title') or f"频道 {index}"
-                    m3u_content += f'#EXTINF:-1 group-title="某藤某古",{channel_name}\n{data["url"]}\n'
+                    channel_name = data.get('name') or data.get('title') or f"74体育 直播 {index}"
+                    raw_stream_url = data["url"]
+                    
+                    # 1. 为支持 ExoPlayer 内核的播放器注入 Header (| 语法)
+                    stream_url_with_headers = f"{raw_stream_url}|Referer={fake_referer}&User-Agent={fake_ua}"
+                    
+                    # 2. 拼接 M3U 文本 (同时加入对 VLC / PotPlayer 兼容的标签)
+                    m3u_content += f'#EXTINF:-1 group-title="体育直播",{channel_name}\n'
+                    m3u_content += f'#EXTVLCOPT:http-referrer={fake_referer}\n'
+                    m3u_content += f'#EXTVLCOPT:http-user-agent={fake_ua}\n'
+                    m3u_content += f'{stream_url_with_headers}\n'
+                    
                     index += 1
         except Exception as e:
             print(f"解密出错跳过: {e}")
             continue
             
-    # 设置响应头，让播放器或浏览器识别为文本内容
+    # 返回纯文本格式，方便播放器直接读取解析
     return Response(
         m3u_content, 
         mimetype='text/plain; charset=utf-8',
