@@ -166,7 +166,10 @@ def generate_m3u(mode="clean"):
     target_key = b"ABCDEFGHIJKLMNOPQRSTUVWX"
     m3u_content = "#EXTM3U\n"
     index = 1
-    fake_referer = "https://www.74001.tv/"
+    
+    # 【核心修复】：防盗链检测的是底层 iframe 的域名
+    fake_referer = "https://cloud.yumixiu768.com/" 
+    fake_ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
     
     for raw_id in ids:
         try:
@@ -184,17 +187,23 @@ def generate_m3u(mode="clean"):
                 data = json.loads(json_str)
                 
                 if 'url' in data:
-                    channel_name = data.get('name') or data.get('title') or f"74体育 直播 {index}"
+                    channel_name = data.get('name') or data.get('title') or f"体育直播 {index}"
                     raw_stream_url = data["url"]
                     
                     if mode == "plus":
-                        # 精简防盗链：只加 Referer，去掉所有空格和多余字符，防止播放器解析崩溃
-                        stream_url = f"{raw_stream_url}|Referer={fake_referer}"
+                        # 兼容 DIYP、TVBox、TiviMate 等各种壳的综合防盗链写法
+                        stream_url = f"{raw_stream_url}|Referer={fake_referer}&User-Agent={fake_ua}"
+                        
+                        m3u_content += f'#EXTINF:-1 group-title="体育直播",{channel_name}\n'
+                        # 添加 VLC 兼容头
+                        m3u_content += f'#EXTVLCOPT:http-referrer={fake_referer}\n'
+                        m3u_content += f'#EXTVLCOPT:http-user-agent={fake_ua}\n'
+                        # 添加 DIYP/百川 兼容头
+                        m3u_content += f'#EXTHTTP:{{"User-Agent":"{fake_ua}","Referer":"{fake_referer}"}}\n'
+                        m3u_content += f'{stream_url}\n'
                     else:
-                        # 绝对纯净版：没有任何后缀
-                        stream_url = raw_stream_url
-                    
-                    m3u_content += f'#EXTINF:-1 group-title="体育直播",{channel_name}\n{stream_url}\n'
+                        m3u_content += f'#EXTINF:-1 group-title="体育直播",{channel_name}\n{raw_stream_url}\n'
+                        
                     index += 1
         except Exception as e:
             continue
@@ -209,7 +218,7 @@ def index():
     return jsonify({
         "status": "running",
         "last_run_time": LAST_RUN_TIME,
-        "endpoints": ["/ids", "/m3u (纯净原版)", "/m3u_plus (带精简Referer版)"]
+        "endpoints": ["/ids", "/m3u (纯净原版)", "/m3u_plus (带综合Referer/UA防盗链版)"]
     })
 
 @app.route('/ids')
@@ -222,7 +231,7 @@ def get_ids():
 
 @app.route('/m3u')
 def get_m3u_clean():
-    """纯净版 M3U，没有任何防盗链后缀，适合容易崩溃的播放器"""
+    """纯净版 M3U，没有任何防盗链后缀"""
     return Response(
         generate_m3u(mode="clean"), 
         mimetype='text/plain; charset=utf-8',
@@ -231,7 +240,7 @@ def get_m3u_clean():
 
 @app.route('/m3u_plus')
 def get_m3u_plus():
-    """精简防盗链版 M3U，只添加安全的 Referer，去掉了导致断链的空格"""
+    """综合防盗链版 M3U，完美伪装底层 iframe 域名，突破拦截"""
     return Response(
         generate_m3u(mode="plus"), 
         mimetype='text/plain; charset=utf-8',
