@@ -177,6 +177,7 @@ def generate_playlist(fmt="m3u", mode="clean"):
         content = "体育直播,#genre#\n"
         
     index = 1
+    proxy_prefix = "https://fcihiglkvhux.sealosbja.site/?url="
     
     for raw_id in ids:
         try:
@@ -201,8 +202,8 @@ def generate_playlist(fmt="m3u", mode="clean"):
                         # plus 模式下追加空的 Referer
                         stream_url = f"{raw_stream_url}|Referer="
                     else:
-                        # clean 模式下（如 /m3u）保持纯净原地址
-                        stream_url = raw_stream_url
+                        # clean 模式下（如 /m3u）在链接前面统一加代理前缀
+                        stream_url = f"{proxy_prefix}{raw_stream_url}"
                     
                     # 严格按照格式拼接
                     if fmt == "m3u":
