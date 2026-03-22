@@ -5,7 +5,7 @@ import base64
 import re
 import urllib.parse
 import json
-from datetime import datetime
+from datetime import datetime, timedelta  # 这里新增了 timedelta
 import pytz
 from playwright.sync_api import sync_playwright
 from flask import Flask, jsonify, Response
@@ -96,6 +96,11 @@ def scrape_job():
         return
 
     links_to_visit = []
+    
+    # 定义时间窗口：当前时间前 4 小时 到 后 1 小时
+    lower_bound = now - timedelta(hours=4)
+    upper_bound = now + timedelta(hours=1)
+
     for a in soup.select('a.clearfix'):
         href = a.get('href')
         time_str = a.get('t-nzf-o')
@@ -104,8 +109,9 @@ def scrape_job():
                 if len(time_str) == 10:
                     time_str += " 00:00:00"
                 match_time = tz.localize(datetime.strptime(time_str, '%Y-%m-%d %H:%M:%S'))
-                diff_hours = abs((now - match_time).total_seconds()) / 3600
-                if diff_hours <= 3:
+                
+                # 判断比赛时间是否在允许的时间窗口内
+                if lower_bound <= match_time <= upper_bound:
                     match_id = href.split('/')[-1]
                     links_to_visit.append(f"https://www.74001.tv/live/{match_id}")
             except Exception:
