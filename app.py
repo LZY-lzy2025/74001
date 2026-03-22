@@ -5,7 +5,7 @@ import base64
 import re
 import urllib.parse
 import json
-from datetime import datetime, timedelta  # 这里新增了 timedelta
+from datetime import datetime, timedelta
 import pytz
 from playwright.sync_api import sync_playwright
 from flask import Flask, jsonify, Response
@@ -202,7 +202,8 @@ def generate_playlist(fmt="m3u", mode="clean"):
                         # 精简且安全的防盗链写法，只挂载 Referer，不包含任何换行和空格
                         stream_url = f"{raw_stream_url}|Referer={fake_referer}"
                     else:
-                        stream_url = raw_stream_url
+                        # 普通模式下（如 /m3u）在最后面加上 |Referer=
+                        stream_url = f"{raw_stream_url}|Referer="
                     
                     # 严格按照格式拼接
                     if fmt == "m3u":
