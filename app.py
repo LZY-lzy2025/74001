@@ -177,7 +177,6 @@ def generate_playlist(fmt="m3u", mode="clean"):
         content = "体育直播,#genre#\n"
         
     index = 1
-    fake_referer = "https://cloud.yumixiu768.com/" 
     
     for raw_id in ids:
         try:
@@ -199,11 +198,11 @@ def generate_playlist(fmt="m3u", mode="clean"):
                     raw_stream_url = data["url"]
                     
                     if mode == "plus":
-                        # 精简且安全的防盗链写法，只挂载 Referer，不包含任何换行和空格
-                        stream_url = f"{raw_stream_url}|Referer={fake_referer}"
-                    else:
-                        # 普通模式下（如 /m3u）在最后面加上 |Referer=
+                        # plus 模式下追加空的 Referer
                         stream_url = f"{raw_stream_url}|Referer="
+                    else:
+                        # clean 模式下（如 /m3u）保持纯净原地址
+                        stream_url = raw_stream_url
                     
                     # 严格按照格式拼接
                     if fmt == "m3u":
