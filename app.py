@@ -19,6 +19,7 @@ OUTPUT_FILE = "output/extracted_ids.txt"
 ENTRY_FILE = "output/extracted_entries.json"
 DEBUG_FILE = "output/debug_last.json"
 LAST_RUN_TIME = "尚未执行"
+FETCH_WINDOW_HOURS = 1
 
 
 # ==========================================
@@ -106,6 +107,82 @@ def parse_match_time(raw_time, tz, now):
     return min(candidates, key=lambda dt: abs(dt - now))
 
 
+def load_existing_entries():
+    if not os.path.exists(ENTRY_FILE):
+        return []
+    try:
+        with open(ENTRY_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def parse_entry_datetime(entry, tz):
+    match_dt = entry.get("match_datetime")
+    if isinstance(match_dt, str):
+        try:
+            parsed = datetime.fromisoformat(match_dt)
+            return parsed if parsed.tzinfo else tz.localize(parsed)
+        except ValueError:
+            pass
+
+    time_text = entry.get("time")
+    if isinstance(time_text, str):
+        try:
+            parsed = datetime.strptime(time_text, "%m-%d %H:%M")
+            now = datetime.now(tz)
+            candidates = [
+                tz.localize(parsed.replace(year=now.year - 1)),
+                tz.localize(parsed.replace(year=now.year)),
+                tz.localize(parsed.replace(year=now.year + 1)),
+            ]
+            return min(candidates, key=lambda dt: abs(dt - now))
+        except ValueError:
+            return None
+    return None
+
+
+def build_keep_window(now):
+    keep_start = (now - timedelta(days=1)).replace(hour=20, minute=0, second=0, microsecond=0)
+    keep_end = now.replace(hour=23, minute=59, second=59, microsecond=999999)
+    return keep_start, keep_end
+
+
+def merge_and_filter_entries(existing_entries, new_entries, now, tz):
+    keep_start, keep_end = build_keep_window(now)
+    merged = {}
+
+    for entry in existing_entries + new_entries:
+        raw_id = entry.get("id", "")
+        if not raw_id:
+            continue
+        match_dt = parse_entry_datetime(entry, tz)
+        if not match_dt:
+            continue
+        if not (keep_start <= match_dt <= keep_end):
+            continue
+
+        normalized = {
+            "league": entry.get("league", ""),
+            "time": match_dt.strftime("%m-%d %H:%M"),
+            "home": entry.get("home", ""),
+            "away": entry.get("away", ""),
+            "id": raw_id,
+            "match_datetime": match_dt.isoformat(),
+        }
+        dedupe_key = (
+            normalized["league"],
+            normalized["time"],
+            normalized["home"],
+            normalized["away"],
+            normalized["id"],
+        )
+        merged[dedupe_key] = normalized
+
+    return sorted(merged.values(), key=lambda x: x["match_datetime"])
+
+
 def extract_source_html(js_text):
     pieces = re.findall(r"document\.write\('(.*?)'\);", js_text, flags=re.DOTALL)
     return "".join(piece.replace("\\'", "'") for piece in pieces)
@@ -134,7 +211,7 @@ def scrape_job(debug=False, ignore_time_filter=False):
     debug_info = {
         "run_time": LAST_RUN_TIME,
         "source_url": SOURCE_JS_URL,
-        "time_window_hours": 3,
+        "fetch_window_hours": FETCH_WINDOW_HOURS,
         "ignore_time_filter": ignore_time_filter,
     }
     print(f"[{LAST_RUN_TIME}] 开始执行抓取任务...")
@@ -159,8 +236,8 @@ def scrape_job(debug=False, ignore_time_filter=False):
             return debug_info
         return None
 
-    lower_bound = now - timedelta(hours=3)
-    upper_bound = now + timedelta(hours=3)
+    lower_bound = now - timedelta(hours=FETCH_WINDOW_HOURS)
+    upper_bound = now + timedelta(hours=FETCH_WINDOW_HOURS)
 
     match_links = []
     all_matches = 0
@@ -188,10 +265,11 @@ def scrape_job(debug=False, ignore_time_filter=False):
                 match_links.append(
                     {
                         "league": league.get_text(strip=True),
-                        "time": match_time.strftime("%m-%d %H:%M"),
+                        "time": match_time.strftime("%m-%d %H:%M") if match_time else match_time_raw.get_text(strip=True),
                         "home": home.get_text(strip=True),
                         "away": away.get_text(strip=True),
                         "href": href,
+                        "match_datetime": match_time.isoformat() if match_time else "",
                     }
                 )
 
@@ -266,7 +344,19 @@ def scrape_job(debug=False, ignore_time_filter=False):
         debug_info["first_level_browser_fallback_count"] = first_level_browser_fallback_count
 
         extracted_entries = []
-        seen = set()
+        existing_entries = load_existing_entries()
+        existing_keys = {
+            (
+                item.get("league", ""),
+                item.get("time", ""),
+                item.get("home", ""),
+                item.get("away", ""),
+                item.get("id", ""),
+            )
+            for item in existing_entries
+            if item.get("id")
+        }
+        seen = set(existing_keys)
         page = browser.new_page()
 
         for item in second_level_links:
@@ -297,20 +387,27 @@ def scrape_job(debug=False, ignore_time_filter=False):
                         "home": item["home"],
                         "away": item["away"],
                         "id": extracted_id,
+                        "match_datetime": item.get("match_datetime", ""),
                     }
                 )
             
         browser.close()
 
     os.makedirs("output", exist_ok=True)
+    existing_entries = load_existing_entries()
+    final_entries = merge_and_filter_entries(existing_entries, extracted_entries, now, tz)
+
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-        for item in extracted_entries:
+        for item in final_entries:
             f.write(item["id"] + "\n")
 
     with open(ENTRY_FILE, "w", encoding="utf-8") as f:
-        json.dump(extracted_entries, f, ensure_ascii=False, indent=2)
+        json.dump(final_entries, f, ensure_ascii=False, indent=2)
 
     debug_info["extracted_count"] = len(extracted_entries)
+    debug_info["stored_count"] = len(final_entries)
+    debug_info["keep_window_start"] = build_keep_window(now)[0].isoformat()
+    debug_info["keep_window_end"] = build_keep_window(now)[1].isoformat()
     debug_info["extracted_samples"] = extracted_entries[:5]
     with open(DEBUG_FILE, "w", encoding="utf-8") as f:
         json.dump(debug_info, f, ensure_ascii=False, indent=2)
