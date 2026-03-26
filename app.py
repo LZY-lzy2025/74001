@@ -111,6 +111,18 @@ def extract_source_html(js_text):
     return "".join(piece.replace("\\'", "'") for piece in pieces)
 
 
+def pick_hd_play_links_from_soup(soup):
+    links = []
+    for a_tag in soup.select("a[data-play]"):
+        label = a_tag.get_text(" ", strip=True)
+        data_play = a_tag.get("data-play", "").strip()
+        if not data_play.startswith("/play/"):
+            continue
+        if "高清直播" in label or "蓝光" in label:
+            links.append(data_play)
+    return links
+
+
 # ==========================================
 # 爬虫任务逻辑
 # ==========================================
@@ -199,36 +211,62 @@ def scrape_job(debug=False, ignore_time_filter=False):
         return None
 
     second_level_links = []
-    for item in match_links:
-        try:
-            res = requests.get(item["href"], headers=headers, timeout=12)
-            res.raise_for_status()
-            inner = BeautifulSoup(res.text, "html.parser")
-        except Exception:
-            continue
+    first_level_blocked_count = 0
+    first_level_browser_fallback_count = 0
 
-        for a_tag in inner.select("a.me[data-play]"):
-            label = a_tag.get_text(" ", strip=True)
-            data_play = a_tag.get("data-play", "").strip()
-            if not data_play.startswith("/play/"):
-                continue
-            if "高清直播" not in label and "蓝光" not in label:
-                continue
-
-            second_level_links.append(
-                {
-                    **item,
-                    "play_url": f"http://play.sportsteam368.com{data_play}",
-                }
-            )
-
-    debug_info["second_level_count"] = len(second_level_links)
-    debug_info["second_level_samples"] = second_level_links[:5]
-
-    extracted_entries = []
-    seen = set()
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-setuid-sandbox"])
+        detail_page = browser.new_page()
+
+        for item in match_links:
+            candidate_data_plays = []
+            try:
+                res = requests.get(item["href"], headers=headers, timeout=12)
+                if res.status_code == 200:
+                    inner = BeautifulSoup(res.text, "html.parser")
+                    candidate_data_plays.extend(pick_hd_play_links_from_soup(inner))
+                else:
+                    first_level_blocked_count += 1
+            except Exception:
+                first_level_blocked_count += 1
+
+            # requests 抓不到时，用浏览器渲染页面后再提取
+            if not candidate_data_plays:
+                try:
+                    first_level_browser_fallback_count += 1
+                    detail_page.goto(item["href"], wait_until="domcontentloaded", timeout=15000)
+                    links = detail_page.evaluate(
+                        """
+                        () => Array.from(document.querySelectorAll('a[data-play]'))
+                            .map(a => ({
+                                label: (a.textContent || '').trim(),
+                                play: (a.getAttribute('data-play') || '').trim()
+                            }))
+                        """
+                    )
+                    for x in links:
+                        play = x.get("play", "")
+                        label = x.get("label", "")
+                        if play.startswith("/play/") and ("高清直播" in label or "蓝光" in label):
+                            candidate_data_plays.append(play)
+                except Exception:
+                    continue
+
+            for data_play in set(candidate_data_plays):
+                second_level_links.append(
+                    {
+                        **item,
+                        "play_url": f"http://play.sportsteam368.com{data_play}",
+                    }
+                )
+
+        debug_info["second_level_count"] = len(second_level_links)
+        debug_info["second_level_samples"] = second_level_links[:5]
+        debug_info["first_level_blocked_count"] = first_level_blocked_count
+        debug_info["first_level_browser_fallback_count"] = first_level_browser_fallback_count
+
+        extracted_entries = []
+        seen = set()
         page = browser.new_page()
 
         for item in second_level_links:
