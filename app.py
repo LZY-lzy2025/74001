@@ -17,6 +17,7 @@ app = Flask(__name__)
 SOURCE_JS_URL = "https://im-imgs-bucket.oss-accelerate.aliyuncs.com/index.js?t_5"
 OUTPUT_FILE = "output/extracted_ids.txt"
 ENTRY_FILE = "output/extracted_entries.json"
+DEBUG_FILE = "output/debug_last.json"
 LAST_RUN_TIME = "尚未执行"
 
 
@@ -113,11 +114,17 @@ def extract_source_html(js_text):
 # ==========================================
 # 爬虫任务逻辑
 # ==========================================
-def scrape_job():
+def scrape_job(debug=False, ignore_time_filter=False):
     global LAST_RUN_TIME
     tz = pytz.timezone("Asia/Shanghai")
     now = datetime.now(tz)
     LAST_RUN_TIME = now.strftime("%Y-%m-%d %H:%M:%S")
+    debug_info = {
+        "run_time": LAST_RUN_TIME,
+        "source_url": SOURCE_JS_URL,
+        "time_window_hours": 3,
+        "ignore_time_filter": ignore_time_filter,
+    }
     print(f"[{LAST_RUN_TIME}] 开始执行抓取任务...")
 
     headers = {
@@ -130,15 +137,24 @@ def scrape_job():
         js_resp.raise_for_status()
         html = extract_source_html(js_resp.text)
         soup = BeautifulSoup(html, "html.parser")
+        debug_info["source_status"] = js_resp.status_code
+        debug_info["source_size"] = len(js_resp.text)
+        debug_info["parsed_ul_count"] = len(soup.select("ul.item.play"))
     except Exception as e:
         print(f"读取源 JS 失败: {e}")
-        return
+        debug_info["error"] = f"读取源 JS 失败: {e}"
+        if debug:
+            return debug_info
+        return None
 
     lower_bound = now - timedelta(hours=3)
     upper_bound = now + timedelta(hours=3)
 
     match_links = []
+    all_matches = 0
+    window_matches = 0
     for ul in soup.select("ul.item.play"):
+        all_matches += 1
         league = ul.select_one("li.lab_events span.name")
         match_time_raw = ul.select_one("li.lab_time")
         home = ul.select_one("li.lab_team_home strong.name")
@@ -148,8 +164,11 @@ def scrape_job():
             continue
 
         match_time = parse_match_time(match_time_raw.get_text(strip=True), tz, now)
-        if not match_time or not (lower_bound <= match_time <= upper_bound):
+        in_window = bool(match_time and (lower_bound <= match_time <= upper_bound))
+        if not ignore_time_filter and not in_window:
             continue
+        if in_window:
+            window_matches += 1
 
         for a_tag in ul.select("li.lab_channel a.me[href]"):
             href = a_tag.get("href", "").strip()
@@ -164,9 +183,20 @@ def scrape_job():
                     }
                 )
 
+    debug_info["all_match_count"] = all_matches
+    debug_info["window_match_count"] = window_matches
+    debug_info["matched_link_count"] = len(match_links)
+    debug_info["match_link_samples"] = match_links[:5]
+
     if not match_links:
         print("时间窗口内未找到可处理的比赛链接。")
-        return
+        debug_info["error"] = "未匹配到比赛链接（可能是时间窗口导致）"
+        os.makedirs("output", exist_ok=True)
+        with open(DEBUG_FILE, "w", encoding="utf-8") as f:
+            json.dump(debug_info, f, ensure_ascii=False, indent=2)
+        if debug:
+            return debug_info
+        return None
 
     second_level_links = []
     for item in match_links:
@@ -191,6 +221,9 @@ def scrape_job():
                     "play_url": f"http://play.sportsteam368.com{data_play}",
                 }
             )
+
+    debug_info["second_level_count"] = len(second_level_links)
+    debug_info["second_level_samples"] = second_level_links[:5]
 
     extracted_entries = []
     seen = set()
@@ -239,7 +272,15 @@ def scrape_job():
     with open(ENTRY_FILE, "w", encoding="utf-8") as f:
         json.dump(extracted_entries, f, ensure_ascii=False, indent=2)
 
+    debug_info["extracted_count"] = len(extracted_entries)
+    debug_info["extracted_samples"] = extracted_entries[:5]
+    with open(DEBUG_FILE, "w", encoding="utf-8") as f:
+        json.dump(debug_info, f, ensure_ascii=False, indent=2)
+
     print(f"任务完成，共提取 {len(extracted_entries)} 条 ID 对应记录。")
+    if debug:
+        return debug_info
+    return None
 
 
 # ==========================================
@@ -307,7 +348,7 @@ def index():
             "status": "running",
             "last_run_time": LAST_RUN_TIME,
             "source": SOURCE_JS_URL,
-            "endpoints": ["/ids", "/m3u", "/m3u_plus", "/txt", "/txt_plus"],
+            "endpoints": ["/ids", "/m3u", "/m3u_plus", "/txt", "/txt_plus", "/debug/run", "/debug/last"],
         }
     )
 
@@ -317,6 +358,20 @@ def ids():
     if not os.path.exists(ENTRY_FILE):
         return jsonify([])
     with open(ENTRY_FILE, "r", encoding="utf-8") as f:
+        return jsonify(json.load(f))
+
+
+@app.route("/debug/run")
+def debug_run():
+    result = scrape_job(debug=True, ignore_time_filter=True)
+    return jsonify(result or {})
+
+
+@app.route("/debug/last")
+def debug_last():
+    if not os.path.exists(DEBUG_FILE):
+        return jsonify({"error": "暂无调试信息，请先访问 /debug/run"})
+    with open(DEBUG_FILE, "r", encoding="utf-8") as f:
         return jsonify(json.load(f))
 
 
